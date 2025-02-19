@@ -40,9 +40,9 @@ shield-bash [script-alias] [options]
 the `-h, --help` flag will give you an overview of available tools. Each tool has their
 own help message, which can be shown using the `-h, --help` flag after the tool name.
 
-### Examples
+### **Examples**
 
-#### 🔍 Running Project Exposure Scan (PES)
+#### 🔍 **Running Project Exposure Scan (PES)**
 ```bash
 shield-bash pes -v
 ```
@@ -50,7 +50,7 @@ shield-bash pes -v
 * Lists ownership & permission issues  
 * Fixes issues unless --dry-run is specified  
 
-#### 📋 Uninstalling Shield-Bash
+#### 📋 **Uninstalling Shield-Bash**
 ```bash
 shield-bash uninstall
 ```
@@ -67,7 +67,7 @@ For help with any script use:
 shield-bash [script-alias] -h
 ```
 
-### Logging
+## 📚 Logging
 Shield-Bash logs all security events to `/var/log/shield-bash/*.log` files, specific to each security tool to ensure compatibility with log monitoring systems. You can review the newest log entries using the following command:
 ```bash	
 tail -f /var/log/shield-bash/*.log
@@ -106,3 +106,15 @@ Push & Create a Pull Request:
 git push origin my-feature
 ```
 * Submit a PR through GitHub
+
+## 📄 License
+
+Shield-Bash is licensed under the MIT License. See the LICENSE file for details.  
+
+## 📢 Support & Feedback
+
+If you encounter any issues or have feature requests:  
+* Open an Issue: GitHub Issues
+* Contribute a Fix: Fork & Submit a PR!
+
+### 🚀 **Secure Your Server with Shield-Bash Today!** 🔒
