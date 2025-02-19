@@ -100,9 +100,9 @@ git checkout -b my-feature
 ```bash
 git add .
 git commit -m "Add my new feature"
-
+```
 Push & Create a Pull Request:
-
+```bash
 git push origin my-feature
 ```
 * Submit a PR through GitHub
