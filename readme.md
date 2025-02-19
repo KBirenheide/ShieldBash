@@ -57,10 +57,10 @@ shield-bash uninstall
 * Removes all installed files, logs, and configurations  
 
 ## 📜 Available Scripts
-|   Alias   |   Description |  
-===
-|   pes   |   Project Exposure Scan - Checks & fixes exposed files |  
-|   uninstall   |   Uninstall Shield-Bash - Removes all components |  
+| Alias | Description |
+| ----- | ----------- |
+| pes | Project Exposure Scan - Checks & fixes exposed files |
+| uninstall | Uninstall Shield-Bash - Removes all components |
 
 For help with any script use:  
 ```bash
