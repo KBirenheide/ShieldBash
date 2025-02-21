@@ -38,6 +38,10 @@ EDITORS=("nano" "vim" "vi" "micro" "code" "subl" "gedit" "kate" "mousepad")
 valid_log_levels=("INFO" "WARNING" "CRITICAL" "FOLLOWUP")
 valid_pes_tags=("EXPOSURE" "CONFIG")
 combined_validator=( "${valid_log_levels[@]}" "${valid_pes_tags[@]}" )
+valid_recursion_flags=( "r" "d" "f" "h" "a")
+
+# Error Resiliance
+misconfigured_lines=()
 
 # Ensure log directory exists
 mkdir -p "$LOG_DIR"
@@ -87,8 +91,9 @@ validate_config() {
     # Ignore comment lines and extract only configuration lines
     while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$owner_group" ]]; do
         let "line++"
+        local has_line_misconfiguration=0
 
-        # Trim leading/trailing whitespace
+        # Trim leading/trailing whitespace 
         owner_group=$(echo "$owner_group" | xargs)
         permissions=$(echo "$permissions" | xargs)
         project_path=$(echo "$project_path" | xargs)
@@ -100,25 +105,31 @@ validate_config() {
         # Validate ownership format (owner:group[:optional flags])
         if ! [[ "$owner_group" =~ ^[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+(:[a-z]+)?$ ]]; then
             echo "[WARNING] Invalid owner:group format found in PES config (line ${line}): '$owner_group'"
+            has_line_misconfiguration=1
         fi
 
         # Validate permissions (should be a 3 or 4-digit octal number)
         if ! [[ "$permissions" =~ ^[0-7]{3,4}(:[a-z]+)?$ ]]; then
             echo "[WARNING] Invalid permissions format found in PES config (line ${line}): '$permissions' (Expected: 3 or 4-digit octal number)"
+            has_line_misconfiguration=1
         fi
 
         # Validate project path
-        if [[ ! -e "$project_path" ]]; then
+        local cleaned_path="${project_path%/*}"
+        if [[ ! -e "$cleaned_path" ]]; then
             echo "[WARNING] Path does not exist found in PES config (line ${line}): '$project_path'"
+            has_line_misconfiguration=1
         fi
-
         # Validate log level (must be one of INFO, WARNING, CRITICAL, FOLLOWUP, CONFIG)
         valid_log_levels=("INFO" "WARNING" "CRITICAL" "FOLLOWUP" "CONFIG")
         log_level_upper=$(echo "$log_level" | tr '[:lower:]' '[:upper:]')
 
         if [[ ! " ${valid_log_levels[*]} " =~ " $log_level_upper " ]]; then
             echo "[WARNING] Invalid log level found in PES config (line ${line}): '$log_level' (Expected: INFO, WARNING, CRITICAL, FOLLOWUP, CONFIG)"
+            has_line_misconfiguration=1
         fi
+
+        [[ $has_line_misconfiguration == 1 ]] && misconfigured_lines=("${misconfigured_lines[@]}" $line)
 
     done < "$CONF_FILE"
 }
@@ -262,17 +273,64 @@ check_config_modification() {
     # If no matching log exists, create a new log entry
     if [[ -z "$log_exists" ]]; then
         if [[ "$VERBOSE" -eq 1 ]] && [[ "$SILENT" -eq 0 ]]; then 
-            echo "[WARNING] The PES configuration file was edited since the last PES run (or the log file has been rotated). use command ${YELLOW}shield-bash pes --pull-log=PESconfig${Reset} to see the edit history." 
+            echo -e "[WARNING] The PES configuration file was edited since the last PES run (or the log file has been rotated). use command ${YELLOW}shield-bash pes --pull-log=PESconfig${RESET} to see the edit history." 
         fi
         echo "$(date '+%Y-%m-%d %H:%M:%S') - [INFO][ShieldBash PES][CONFIG] Configuration file modified by: $config_owner at $config_mtime_readable" >> "$LOG_FILE"
+    fi
+}
+
+# Function: Item owner validation
+owner_mismatch=0
+validate_owner()
+{
+    local actual_owner=$1
+    local expected_owner=$2
+    local actual_group=$3
+    local expected_group=$4
+    local item=$5
+
+    if [[ "$actual_owner" != "$expected_owner" || "$actual_group" != "$expected_group" ]]; then
+        log_exposure "$item" "Ownership mismatch (Expected: $expected_owner:$expected_group, Found: $actual_owner:$actual_group)" "$owner_mismatch"
+        owner_mismatch="FOLLOWUP"
+        [[ "$CHECK_ONLY" -eq 1 ]] && [[ "$SILENT" -eq 0 ]] && echo "[CHECK-ONLY] Ownership issue: $item -> Expected: $expected_owner:$expected_group, Found: $actual_owner:$actual_group"
+        apply_fix "chown $expected_owner:$expected_group '$item'"
+    elif [[ "$VERBOSE" -eq 1 ]] && [[ "$SILENT" -eq 0 ]]; then
+        echo "[INFO] Ownership OK: $item"
+    fi
+}
+
+# Function: validate permission settings
+file_mismatch=0
+validate_permissions() 
+{
+    local actual_perms=$1
+    local permissions_clean=$2
+    local item=$3
+
+    if [[ "$actual_perms" != "$permissions_clean" ]]; then
+        log_exposure "$item" "Permissions mismatch (Expected: $permissions_clean, Found: $actual_perms)" "$file_mismatch"
+        file_mismatch="FOLLOWUP"
+        [[ "$CHECK_ONLY" -eq 1 ]] && [[ "$SILENT" -eq 0 ]] && echo "[CHECK-ONLY] Permissions issue: $item -> Expected: $permissions_clean, Found: $actual_perms"
+        apply_fix "chmod $permissions_clean '$item'"
+    elif [[ "$VERBOSE" -eq 1 ]] && [[ "$SILENT" -eq 0 ]]; then
+        echo "[INFO] Permissions OK: $item"
     fi
 }
 
 check_config_modification
 validate_config
 
+config_line=0 
+
 # Read and process configuration file
 while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$owner_group" ]]; do
+    # skip misconfigured lines
+    let "config_line++"
+    if [[ " ${misconfigured_lines[*]} " =~ " ${config_line} " ]]; then
+        [[ "$SILENT" -eq 0 ]] && echo "[INFO] Skipping misconfigured line $config_line in $CONF_FILE"
+        continue
+    fi
+
     # Trim whitespace
     owner_group=$(echo "$owner_group" | xargs)
     permissions=$(echo "$permissions" | xargs)
@@ -299,9 +357,6 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     expected_group="${owner_group_clean##*:}"
     [[ -z "$expected_owner" || -z "$expected_group" ]] && log_exposure "$project_path" "Missing owner:group column for entry" "$log_level" && continue
 
-    # Extract ownership flags
-    ownership_flag=$(echo "$owner_group" | awk -F':' '{print $3}')
-
     # Extract permissions components
     permissions_clean=$(echo "$permissions" | cut -d':' -f1)
     perms_flag=$(echo "$permissions" | awk -F':' '{print $2}')
@@ -311,37 +366,83 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     expected_group=$(echo "$owner_group_clean" | cut -d':' -f2)
 
     # Check if directory or file exists
-    if [[ ! -e "$project_path" ]]; then
+    cleaned_path="${project_path%/*}"
+    if [[ ! -e "$cleaned_path" ]]; then
         log_exposure "$project_path" "Path does not exist" "$log_level"
         [[ "$SILENT" -eq 0 ]] && echo "Warning: $project_path does not exist, skipping..."
         continue
     fi
 
+    # Extract ownership flags (e.g., :ra, :rah, :rd, :rdh, etc.)
+    ownership_flag=$(echo "$owner_group" | awk -F':' '{print $3}')
+
+    # Extract permission flags (e.g., :rf, :rfh, etc.)
+    perms_flag=$(echo "$permissions" | awk -F':' '{print $2}')
+
+    # Create a scannable flag array, then leverage it to determine find command parameters
+    ownership_flag=$(echo "$ownership_flag" | xargs)
+    perms_flag=$(echo "$perms_flag" | xargs)
+    char_array=($(echo "$ownership_flag$perms_flag" | grep -o . | sort -u))
+
+    # Check for invalid flags
+    for char in "${char_array[@]}"; do
+        if [[ ! " ${valid_recursion_flags[*]} " =~ " $char " ]]; then
+            [[ "$SILENT" -eq 0 ]] && echo "Warning: incorrect ownership flags (${ownership_flag}) or permission flags (${perms_flag})"
+            continue 2  # Skip the current iteration of the outer while loop
+        fi
+    done
+
+    # Create a scannable flag array, then leverage it to determine find command parameters
+    char_array=($(echo "$ownership_flag$perms_flag" | grep -o . | sort -u))
+    include_hidden=0
+    find_hidden=" ! -name \".*\""
+    find_parts=()
+
+
+    # If hidden files SHOULD be included, clear the exclusion rule
+    [[ " ${char_array[*]} " =~ " h " ]] && find_hidden=""
+
+    # Enable flags based on detected characters
+    [[ " ${char_array[*]} " =~ " d " ]] && recurse_directories=1 && find_parts+=("-type d$find_hidden")
+    [[ $recurse_directories -eq 1 && $recurse_files -eq 1 ]] && find_parts+=("-o")
+    [[ " ${char_array[*]} " =~ " f " ]] && recurse_files=1 && find_parts+=("-type f$find_hidden")
+
+    # Construct find command safely by joining array elements
+    find_cmd="find \"$project_path\""
+    [[ ${#find_parts[@]} -gt 0 ]] && find_cmd+=" ${find_parts[*]}"
+
+    # Handle pase-bath
+    actual_perms=$(stat -c "%a" "$project_path")
+    actual_owner=$(stat -c "%U" "$project_path")
+    actual_group=$(stat -c "%G" "$project_path")
+    validate_owner "$actual_owner" "$expected_owner" "$actual_group" "$expected_group" "$project_path"
+    validate_permissions "$actual_perms" "$permissions_clean" "$project_path"
+    [[ ! " ${char_array[*]} " =~ " r " ]] && continue
+
     # Check and fix ownership and permissions (including recursion)
-    find "$project_path" -type d -or -type f | while IFS= read -r item; do
+    eval $find_cmd | while IFS= read -r item; do
+
+        [[ -z "$item" ]] && continue
+        [[ "$item" == "$project_path" ]] && continue
+
         actual_perms=$(stat -c "%a" "$item")
         actual_owner=$(stat -c "%U" "$item")
         actual_group=$(stat -c "%G" "$item")
         owner_mismatch=$log_level
         file_mismatch=$log_level
 
-        if [[ "$actual_owner" != "$expected_owner" || "$actual_group" != "$expected_group" ]]; then
-            log_exposure "$item" "Ownership mismatch (Expected: $expected_owner:$expected_group, Found: $actual_owner:$actual_group)" "$owner_mismatch"
-            owner_mismatch="FOLLOWUP"
-            [[ "$CHECK_ONLY" -eq 1 ]] && [[ "$SILENT" -eq 0 ]] && echo "[CHECK-ONLY] Ownership issue: $item -> Expected: $expected_owner:$expected_group, Found: $actual_owner:$actual_group"
-            apply_fix "chown $expected_owner:$expected_group '$item'"
-        elif [[ "$VERBOSE" -eq 1 ]] && [[ "$SILENT" -eq 0 ]]; then
-            echo "[INFO] Ownership OK: $item"
+        # Check if the item is hidden using a regex match
+        is_hidden=0
+        [[ "$item" =~ (^|/)\.[^/]+(/|$) ]] && is_hidden=1
+
+        if [[ " $ownership_flag " == *h* || $is_hidden -eq 0 ]]; then
+            [[ ! -z "$ownership_flag" ]] && validate_owner "$actual_owner" "$expected_owner" "$actual_group" "$expected_group" "$item"
         fi
 
-        if [[ "$actual_perms" != "$permissions_clean" ]]; then
-            log_exposure "$item" "Permissions mismatch (Expected: $permissions_clean, Found: $actual_perms)" "$file_mismatch"
-            file_mismatch="FOLLOWUP"
-            [[ "$CHECK_ONLY" -eq 1 ]] && [[ "$SILENT" -eq 0 ]] && echo "[CHECK-ONLY] Permissions issue: $item -> Expected: $permissions_clean, Found: $actual_perms"
-            apply_fix "chmod $permissions_clean '$item'"
-        elif [[ "$VERBOSE" -eq 1 ]] && [[ "$SILENT" -eq 0 ]]; then
-            echo "[INFO] Permissions OK: $item"
+        if [[ " $perms_flag " == *h* || $is_hidden -eq 0 ]]; then
+            [[ ! -z "$perms_flag" ]] && validate_permissions "$actual_perms" "$permissions_clean" "$item"   
         fi
+
     done
 
 done < "$CONF_FILE"
