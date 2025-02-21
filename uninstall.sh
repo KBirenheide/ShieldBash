@@ -41,8 +41,8 @@ show_help() {
     echo -e "${BOLD_WHITE}Shield-Bash Uninstaller${RESET}"
     echo
     echo -e "${BOLD_WHITE}Description:${RESET}"
-    echo "  This script removes all Shield-Bash components, including scripts,"
-    echo "  configuration files, and logs."
+    echo "  This script removes all Shield-Bash components, including scripts"
+    echo "  and configuration files."
     echo
     echo -e "${GREEN}Usage:${RESET} shield-bash uninstall [options]"
     echo
