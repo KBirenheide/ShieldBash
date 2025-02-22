@@ -38,7 +38,7 @@ BIN_PATH="/usr/local/bin/shield-bash"
 SCRIPT_DIR="$(pwd)"
 
 # Required dependencies
-DEPENDENCIES=("stat" "find" "awk" "chmod" "chown" "ln" "mkdir" "cp" "rm" "grep" "sort")
+DEPENDENCIES=("stat" "find" "awk" "chmod" "chown" "ln" "mkdir" "cp" "rm" "grep" "sort" "tr" "cut" "alias")
 
 # Detect package manager
 if command -v apt &> /dev/null; then

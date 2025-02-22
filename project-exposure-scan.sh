@@ -93,14 +93,14 @@ validate_config() {
         let "line++"
         local has_line_misconfiguration=0
 
+        # Skip commented lines and empty lines
+        [[ "$owner_group" =~ ^#.*$ || -z "$owner_group" ]] && continue
+
         # Trim leading/trailing whitespace 
         owner_group=$(echo "$owner_group" | xargs)
         permissions=$(echo "$permissions" | xargs)
-        project_path=$(echo "$project_path" | xargs)
+        project_path=$(echo "$project_path" | xargs | sed 's/\/\*$//g; s/\/$//g; s/\/\*\..*$//g')
         log_level=$(echo "$log_level" | xargs)
-
-        # Skip commented lines and empty lines
-        [[ "$owner_group" =~ ^#.*$ || -z "$owner_group" ]] && continue
 
         # Validate ownership format (owner:group[:optional flags])
         if ! [[ "$owner_group" =~ ^[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+(:[a-z]+)?$ ]]; then
@@ -115,11 +115,15 @@ validate_config() {
         fi
 
         # Validate project path
-        local cleaned_path="${project_path%/*}"
-        if [[ ! -e "$cleaned_path" ]]; then
+        if [[ ! -e "$project_path" ]]; then
             echo "[WARNING] Path does not exist found in PES config (line ${line}): '$project_path'"
             has_line_misconfiguration=1
         fi
+        if [[ ! "$project_path" =~ ^\/ ]]; then
+            echo "[WARNING] Paths need to be absolute. Relative paths are skipped during exposure scans (line ${line}): '$project_path'"
+            has_line_misconfiguration=1
+        fi
+
         # Validate log level (must be one of INFO, WARNING, CRITICAL, FOLLOWUP, CONFIG)
         valid_log_levels=("INFO" "WARNING" "CRITICAL" "FOLLOWUP" "CONFIG")
         log_level_upper=$(echo "$log_level" | tr '[:lower:]' '[:upper:]')
@@ -337,6 +341,23 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     project_path=$(echo "$project_path" | xargs)
     log_level=$(echo "$log_level" | xargs)
     
+    # Initialize path flags
+    co=0  # Children Only flag
+    eo=0  # Extension Only flag
+    ext=""  # Holds extracted extension
+
+    # Detect wildcard patterns before sanitization
+    if [[ "$project_path" =~ \/\*$ ]]; then
+        co=1
+    elif [[ "$project_path" =~ \/\*\.[a-zA-z0-9]+$ ]]; then
+        eo=1
+        # Extract file extension and turn it to upper case
+        ext=$(echo "${project_path##*.}" | tr '[:lower:]' '[:upper:]')  
+    fi
+
+    # Sanitize the path (remove wildcards)
+    project_path=$(echo "$project_path" | sed 's/\/\*$//g; s/\/$//g; s/\/\*\..*$//g')
+    
     # Skip comments and empty lines
     [[ "$owner_group" =~ ^#.*$ || -z "$owner_group" ]] && continue
 
@@ -366,8 +387,7 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     expected_group=$(echo "$owner_group_clean" | cut -d':' -f2)
 
     # Check if directory or file exists
-    cleaned_path="${project_path%/*}"
-    if [[ ! -e "$cleaned_path" ]]; then
+    if [[ ! -e "$project_path" ]]; then
         log_exposure "$project_path" "Path does not exist" "$log_level"
         [[ "$SILENT" -eq 0 ]] && echo "Warning: $project_path does not exist, skipping..."
         continue
@@ -415,8 +435,8 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     actual_perms=$(stat -c "%a" "$project_path")
     actual_owner=$(stat -c "%U" "$project_path")
     actual_group=$(stat -c "%G" "$project_path")
-    validate_owner "$actual_owner" "$expected_owner" "$actual_group" "$expected_group" "$project_path"
-    validate_permissions "$actual_perms" "$permissions_clean" "$project_path"
+    [[ $co -eq 0 ]] && validate_owner "$actual_owner" "$expected_owner" "$actual_group" "$expected_group" "$project_path"
+    [[ $co -eq 0 ]] && validate_permissions "$actual_perms" "$permissions_clean" "$project_path"
     [[ ! " ${char_array[*]} " =~ " r " ]] && continue
 
     # Check and fix ownership and permissions (including recursion)
@@ -424,6 +444,8 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
 
         [[ -z "$item" ]] && continue
         [[ "$item" == "$project_path" ]] && continue
+        item_ext=$(echo ${item##*.} | tr '[:lower:]' '[:upper:]')
+        [[ $eo -eq 1 && "$item_ext" != "$ext" ]] && continue
 
         actual_perms=$(stat -c "%a" "$item")
         actual_owner=$(stat -c "%U" "$item")
