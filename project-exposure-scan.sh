@@ -236,11 +236,14 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# Function to log exposures
-log_exposure() {
-    local directory="$1"
+# Function to populate the exposure logging queue
+declare -A ownership_fix_log_entries
+declare -A permission_fix_log_entries
+build_log_entry() {
+    local path="$1"
     local issue="$2"
     local log_level="$3"
+    local type="$4"
 
     # Normalize log level to uppercase
     log_level=$(echo "$log_level" | tr '[:lower:]' '[:upper:]')
@@ -250,7 +253,15 @@ log_exposure() {
         log_level="INFO"
     fi
 
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - [$log_level][ShieldBash PES][EXPOSURE] $directory -> $issue" >> "$LOG_FILE"
+    # Prepare log entry
+    local log_entry="$(date '+%Y-%m-%d %H:%M:%S') - [$log_level][ShieldBash PES][EXPOSURE] $path -> $issue"
+
+    # Store or update log entry for path
+    if [[ "$type" == "OWNERSHIP" ]]; then
+        ownership_fix_log_entries["$path"]="$log_entry"
+    elif [[ "$type" == "PERMISSION" ]]; then
+        permission_fix_log_entries["$path"]="$log_entry"
+    fi
 }
 
 # Function to apply fixes (skipped if CHECK_ONLY=1)
@@ -258,6 +269,43 @@ apply_fix() {
     if [[ "$CHECK_ONLY" -eq 0 ]]; then
         eval "$1"
     fi
+}
+
+# Function to queue fixes
+declare -A ownership_fixes
+declare -A permission_fixes
+defer_fix() {
+    local path="$1"
+    local command="$2"
+    local log_entry="$3"
+    local type="$4"
+    local log_level="$5"
+
+    # debug: echo "$path - $command - $log_entry"
+
+    if [[ "$type" == "OWNERSHIP" ]]; then
+        ownership_fixes["$path"]="$command"
+    elif [[ "$type" == "PERMISSION" ]]; then
+        permission_fixes["$path"]="$command"
+    else
+        return
+    fi
+
+    build_log_entry "$path" "$log_entry" "$log_level" "$type" "$log_level"
+}
+
+execute_fixes() {
+    for path in "${!ownership_fixes[@]}"; do
+        [[ $SILENT -eq 0 ]] && echo "${ownership_fix_log_entries[$path]}"
+        echo "${ownership_fix_log_entries[$path]}" >> "$LOG_FILE"
+        apply_fix "${ownership_fixes[$path]}"
+    done
+
+    for path in "${!permission_fixes[@]}"; do
+        [[ $SILENT -eq 0 ]] && echo "${permission_fix_log_entries[$path]}"
+        echo "${permission_fix_log_entries[$path]}" >> "$LOG_FILE"
+        apply_fix "${permission_fixes[$path]}"
+    done
 }
 
 # Function to log configuration file changes
@@ -284,7 +332,6 @@ check_config_modification() {
 }
 
 # Function: Item owner validation
-owner_mismatch=0
 validate_owner()
 {
     local actual_owner=$1
@@ -293,18 +340,22 @@ validate_owner()
     local expected_group=$4
     local item=$5
 
+    # debg: echo "$actual_owner:$actual_group - $expected_owner:$expected_group"
+
     if [[ "$actual_owner" != "$expected_owner" || "$actual_group" != "$expected_group" ]]; then
-        log_exposure "$item" "Ownership mismatch (Expected: $expected_owner:$expected_group, Found: $actual_owner:$actual_group)" "$owner_mismatch"
-        owner_mismatch="FOLLOWUP"
-        [[ "$CHECK_ONLY" -eq 1 ]] && [[ "$SILENT" -eq 0 ]] && echo "[CHECK-ONLY] Ownership issue: $item -> Expected: $expected_owner:$expected_group, Found: $actual_owner:$actual_group"
-        apply_fix "chown $expected_owner:$expected_group '$item'"
+        local log="Ownership mismatch (Expected: $expected_owner:$expected_group, Found: $actual_owner:$actual_group)"
+        [[ "$CHECK_ONLY" -eq 1 ]] && [[ "$SILENT" -eq 0 ]] && echo "[CHECK-ONLY] Potential Ownership issue: $item -> Expected: $expected_owner:$expected_group, Found: $actual_owner:$actual_group; may be resolved by a later rule."
+        defer_fix "$item" "chown $expected_owner:$expected_group '$item'" "$log" "OWNERSHIP" "$log_level"
     elif [[ "$VERBOSE" -eq 1 ]] && [[ "$SILENT" -eq 0 ]]; then
         echo "[INFO] Ownership OK: $item"
+        # Remove previously queued fixes for this item
+        [[ "$CHECK_ONLY" -eq 1 && "$SILENT" -eq 0 && ! -z "${permission_fixes[$item]}" ]] && echo "[CHECK-ONLY] Ownership issue for: $item was resolved by subsequent rule."
+        unset "ownership_fixes[$item]"
+        unset "ownership_fix_log_entries[$item]"
     fi
 }
 
 # Function: validate permission settings
-file_mismatch=0
 validate_permissions() 
 {
     local actual_perms=$1
@@ -312,12 +363,15 @@ validate_permissions()
     local item=$3
 
     if [[ "$actual_perms" != "$permissions_clean" ]]; then
-        log_exposure "$item" "Permissions mismatch (Expected: $permissions_clean, Found: $actual_perms)" "$file_mismatch"
-        file_mismatch="FOLLOWUP"
-        [[ "$CHECK_ONLY" -eq 1 ]] && [[ "$SILENT" -eq 0 ]] && echo "[CHECK-ONLY] Permissions issue: $item -> Expected: $permissions_clean, Found: $actual_perms"
-        apply_fix "chmod $permissions_clean '$item'"
-    elif [[ "$VERBOSE" -eq 1 ]] && [[ "$SILENT" -eq 0 ]]; then
+        local log="Permissions mismatch (Expected: $permissions_clean, Found: $actual_perms)"
+        [[ "$CHECK_ONLY" -eq 1 && "$SILENT" -eq 0 ]] && echo "[CHECK-ONLY] Potential permissions issue: $item -> Expected: $permissions_clean, Found: $actual_perms; may be resolved by a later rule."
+        defer_fix "$item" "chmod $permissions_clean '$item'" "$log" "PERMISSION" "$log_level"
+    elif [[ "$VERBOSE" -eq 1 && "$SILENT" -eq 0 ]]; then
         echo "[INFO] Permissions OK: $item"
+        # Remove previously queued fixes for this item
+        [[ "$CHECK_ONLY" -eq 1 && "$SILENT" -eq 0 && ! -z "${permission_fixes[$item]}" ]] && echo "[CHECK-ONLY] Permissions issue for: $item was resolved by subsequent rule."
+        unset "permission_fixes[$item]"
+        unset "permission_fix_log_entries[$item]"
     fi
 }
 
@@ -325,6 +379,8 @@ check_config_modification
 validate_config
 
 config_line=0 
+
+[[ "$SILENT" -eq 0 && $VERBOSE -eq 1 ]] && echo "Checking elements and creating exposure report..."
 
 # Read and process configuration file
 while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$owner_group" ]]; do
@@ -362,10 +418,10 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     [[ "$owner_group" =~ ^#.*$ || -z "$owner_group" ]] && continue
 
     # Skip with logged error in case of null path
-    [[ -z "$project_path" ]] && log_exposure "Missing path column for entry" "" "ERROR" && continue
+    [[ -z "$project_path" ]] && queue_exposure_log "Missing path column for entry" "" "ERROR" && continue
 
     # Skip with logged error in case of null permissions
-    [[ -z "$permissions" ]] && log_exposure "Missing permissions column for entry" "" "ERROR" && continue
+    [[ -z "$permissions" ]] && queue_exposure_log "Missing permissions column for entry" "" "ERROR" && continue
 
     # Ensure log_level has a valid default
     [[ -z "$log_level" ]] && log_level="INFO"
@@ -376,7 +432,7 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     # Extract expected owner and group and skip with logged error on null
     expected_owner="${owner_group_clean%%:*}"
     expected_group="${owner_group_clean##*:}"
-    [[ -z "$expected_owner" || -z "$expected_group" ]] && log_exposure "$project_path" "Missing owner:group column for entry" "$log_level" && continue
+    [[ -z "$expected_owner" || -z "$expected_group" ]] && queue_exposure_log "$project_path" "Missing owner:group column for entry" "$log_level" && continue
 
     # Extract permissions components
     permissions_clean=$(echo "$permissions" | cut -d':' -f1)
@@ -388,7 +444,7 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
 
     # Check if directory or file exists
     if [[ ! -e "$project_path" ]]; then
-        log_exposure "$project_path" "Path does not exist" "$log_level"
+        queue_exposure_log "$project_path" "Path does not exist" "$log_level"
         [[ "$SILENT" -eq 0 ]] && echo "Warning: $project_path does not exist, skipping..."
         continue
     fi
@@ -418,14 +474,15 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     find_hidden=" ! -name \".*\""
     find_parts=()
 
-
     # If hidden files SHOULD be included, clear the exclusion rule
     [[ " ${char_array[*]} " =~ " h " ]] && find_hidden=""
 
     # Enable flags based on detected characters
-    [[ " ${char_array[*]} " =~ " d " ]] && recurse_directories=1 && find_parts+=("-type d$find_hidden")
-    [[ $recurse_directories -eq 1 && $recurse_files -eq 1 ]] && find_parts+=("-o")
-    [[ " ${char_array[*]} " =~ " f " ]] && recurse_files=1 && find_parts+=("-type f$find_hidden")
+    recurse_directories=0
+    recurse_files=0
+    [[ " ${char_array[*]} " =~ " d " || " ${char_array[*]} " =~ " a " ]] && recurse_directories=1 && find_parts+=("-type d$find_hidden")
+    [[ $recurse_directories -eq 1 && " ${char_array[*]} " =~ " f " ]] && find_parts+=("-o")
+    [[ " ${char_array[*]} " =~ " f " || " ${char_array[*]} " =~ " a " ]] && recurse_files=1 && find_parts+=("-type f$find_hidden")
 
     # Construct find command safely by joining array elements
     find_cmd="find \"$project_path\""
@@ -435,12 +492,14 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
     actual_perms=$(stat -c "%a" "$project_path")
     actual_owner=$(stat -c "%U" "$project_path")
     actual_group=$(stat -c "%G" "$project_path")
-    [[ $co -eq 0 ]] && validate_owner "$actual_owner" "$expected_owner" "$actual_group" "$expected_group" "$project_path"
-    [[ $co -eq 0 ]] && validate_permissions "$actual_perms" "$permissions_clean" "$project_path"
+    if [[ ($co -eq 0 && $eo -eq 0) || -f "$project_path" ]]; then 
+        validate_owner "$actual_owner" "$expected_owner" "$actual_group" "$expected_group" "$project_path"
+        validate_permissions "$actual_perms" "$permissions_clean" "$project_path"
+    fi
     [[ ! " ${char_array[*]} " =~ " r " ]] && continue
 
     # Check and fix ownership and permissions (including recursion)
-    eval $find_cmd | while IFS= read -r item; do
+    while IFS= read -r item; do
 
         [[ -z "$item" ]] && continue
         [[ "$item" == "$project_path" ]] && continue
@@ -450,14 +509,11 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
         actual_perms=$(stat -c "%a" "$item")
         actual_owner=$(stat -c "%U" "$item")
         actual_group=$(stat -c "%G" "$item")
-        owner_mismatch=$log_level
-        file_mismatch=$log_level
 
         # Check if the item is hidden using a regex match
         is_hidden=0
         [[ "$item" =~ (^|/)\.[^/]+(/|$) ]] && is_hidden=1
-
-        if [[ " $ownership_flag " == *h* || $is_hidden -eq 0 ]]; then
+        if [[ " $ownership_flag " == *h* || $is_hidden -eq 0 ]]; then           
             [[ ! -z "$ownership_flag" ]] && validate_owner "$actual_owner" "$expected_owner" "$actual_group" "$expected_group" "$item"
         fi
 
@@ -465,8 +521,13 @@ while IFS="|" read -r owner_group permissions project_path log_level || [[ -n "$
             [[ ! -z "$perms_flag" ]] && validate_permissions "$actual_perms" "$permissions_clean" "$item"   
         fi
 
-    done
+    done < <(eval $find_cmd)
 
 done < "$CONF_FILE"
+
+[[ "$SILENT" -eq 0 && $VERBOSE -eq 1 && $CHECK_ONLY -eq 0 ]] && echo "Executing fixes and creating logs..."
+[[ "$SILENT" -eq 0 && $VERBOSE -eq 1 && $CHECK_ONLY -eq 1 ]] && echo "Creating logs..."
+
+execute_fixes
 
 [[ "$SILENT" -eq 0 ]] && echo "Project exposure scan completed. Log file: $LOG_FILE"
