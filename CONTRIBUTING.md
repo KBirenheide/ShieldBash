@@ -10,8 +10,8 @@ Thank you for your interest in contributing to **Shield-Bash**! 🔒 This docume
 Before contributing, **fork the repository** to your GitHub account:
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USERNAME/shield-bash.git
-cd shield-bash
+git clone https://github.com/KBirenheide/ShieldBash
+cd ShieldBash
 ```
 
 ### 2️⃣ **Understanding the Structure**
